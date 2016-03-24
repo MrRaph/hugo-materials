@@ -1,0 +1,287 @@
+global
+  #log 127.0.0.1 local0
+  #log 127.0.0.1 local0
+  #log 127.0.0.1 local1 notice
+  #log 127.0.0.1 local1 notice
+  log /dev/log local0 debug
+  log /dev/log local1 debug
+  #user haproxy
+  #group haproxy
+  # daemon
+  tune.ssl.default-dh-param 2048
+  maxconn  4096
+
+defaults
+  log global
+  mode http
+  option forwardfor
+  option http-server-close
+  option httplog
+  option log-health-checks
+  option dontlognull
+  #timeout connect 5000
+  #timeout client 10000
+  #timeout server 10000
+  maxconn  2000
+  timeout connect 180000
+  timeout client 180000
+  timeout server 180000
+  #errorfile 400 /etc/haproxy/errors/400.http
+  #errorfile 403 /etc/haproxy/errors/403.http
+  #errorfile 408 /etc/haproxy/errors/408.http
+  #errorfile 500 /etc/haproxy/errors/500.http
+  #errorfile 502 /etc/haproxy/errors/502.http
+  #errorfile 503 /etc/haproxy/errors/503.http
+  #errorfile 504 /etc/haproxy/errors/504.http
+  #ssl-default-bind-ciphers ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!DSS
+  #ssl-default-bind-options no-sslv3
+
+#listen stats :70
+#  stats enable
+#  stats uri /
+
+frontend balancer
+  bind 0.0.0.0:80
+  mode http
+  #default_backend lemonLDAP_backends
+  default_backend techan_backends
+  #reqadd X-Forwarded-Proto:\ https
+
+  # Define hosts
+  acl host_admin hdr(host) -i docker.aldanet.fr
+  acl host_git hdr(host) -i git.aldanet.fr
+  acl host_techan hdr(host) -i techan.fr
+  acl host_shipyard hdr(host) -i shipyard.aldanet.fr
+  acl host_prox hdr(host) -i prox.aldanet.fr
+
+  redirect scheme https if !{ ssl_fc } host_git
+  redirect scheme https if !{ ssl_fc } host_techan
+
+  ## Let's Encrypt
+  acl letsencrypt-request path_beg -i /.well-known/acme-challenge/
+  use_backend letsencrypt if letsencrypt-request
+
+  ## LemonLDAP
+  acl host_lemon_auth hdr(host) -i auth.aldanet.fr
+  acl host_lemon_manager hdr(host) -i manager.aldanet.fr
+  acl host_lemon_reload hdr(host) -i reload.aldanet.fr
+
+  ## Ghosts ... Booooouh !!!
+  acl host_blog hdr(host) -i blog.aldanet.fr
+  acl host_books hdr(host) -i books.aldanet.fr
+
+  use_backend lemonLDAP_backends if host_lemon_auth
+  use_backend lemonLDAP_backends if host_lemon_manager
+  use_backend lemonLDAP_backends if host_lemon_reload
+
+
+  use_backend blog_backends if host_blog
+  use_backend blog_backends if host_books
+  #use_backend prox_backends if host_prox
+
+
+  ## figure out which one to use
+  use_backend admin_backends if host_admin
+  #use_backend git_backends  if host_git
+  use_backend shipyard_backends  if host_shipyard
+
+  use_backend techan_backends  if host_techan
+
+frontend https
+  #log global
+  log /dev/log local0 debug
+  mode tcp
+  option tcplog
+  bind 0.0.0.0:443 ssl crt /haproxy-override/certs/ ciphers ECDHE-RSA-AES256-SHA:RC4-SHA:RC4:HIGH:!MD5:!aNULL:!EDH:!AESGCM
+  reqadd X-Forwarded-Proto:\ https
+
+  tcp-request inspect-delay 5s
+  tcp-request content accept if { req.ssl_hello_type 1 }
+
+  acl letsencrypt-request path_beg -i /.well-known/acme-challenge/
+  acl host_lemon_auth hdr(host) -i auth.aldanet.fr
+  acl host_lemon_manager hdr(host) -i manager.aldanet.fr
+  acl host_lemon_reload hdr(host) -i reload.aldanet.fr
+  acl host_git hdr(host) -i git.aldanet.fr
+  acl host_stats hdr(host) -i stats.aldanet.fr
+  acl host_techan hdr(host) -i techan.fr
+  #acl ssh_shipyard req.ssl_sni -i shipyard.aldanet.fr
+  #acl proto_ovpn req.ssl_sni -i vpn.aldanet.fr
+
+  use_backend letsencrypt if letsencrypt-request
+  use_backend lemonLDAP_HTTPS_backends if host_lemon_auth
+  use_backend lemonLDAP_HTTPS_backends if host_lemon_manager
+  use_backend lemonLDAP_HTTPS_backends if host_lemon_reload
+  use_backend git_backends  if host_git
+  use_backend stats_backends  if host_stats
+  use_backend techan_backends  if host_techan
+  #use_backend ovpn_backend if  !{ req.ssl_hello_type 1 } !{ req.len 0 }
+  #use_backend ovpn_backend if proto_ovpn
+  #use_backend backend_ssh if  !{ req.ssl_hello_type 1 } { req.len 0 } #ssh_shipyard
+
+  #default_backend lemonLDAP_HTTPS_backends
+  default_backend techan_backends
+
+frontend ldap
+	bind *:389
+	mode tcp
+       option tcplog
+	default_backend ldap_backends
+
+frontend git_sshd
+       bind *:8022
+       mode tcp
+       option tcplog
+       default_backend git_ssh
+       #timeout client 1h
+
+       acl ssh_gitlab req.ssl_sni -i git.aldanet.fr
+       use_backend git_ssh if ssh_gitlab
+
+
+backend ldap_backends
+	mode tcp
+	server openldap-server openldap.admin:389
+
+backend git_ssh
+       mode tcp
+       server git-ssh 10.1.6.103:22 #check port 22
+
+backend letsencrypt
+        server letsencrypt 10.1.6.103:443 ssl verify none
+
+backend lemonLDAP_HTTPS_backends
+  #mode https
+  option forwardfor
+  #balance roundrobin
+  balance source
+  #appsession JSESSIONID len 52 timeout 3h
+  cookie SRV insert indirect nocache
+  server lemonHTTP lemon-ldap.admin:443 ssl verify none #check
+  #server webc webc:80 check
+  # option httpchk OPTIONS * HTTP/1.1\r\nHost:\ localhost
+  option httpchk GET /
+  http-check expect status 200
+
+backend lemonLDAP_backends
+  mode http
+  option forwardfor
+  balance source
+  #appsession JSESSIONID len 52 timeout 3h
+  cookie SRV insert indirect nocache
+  server lemonHTTP lemon-ldap.admin:80 #check
+  option httpchk GET /
+  http-check expect status 200
+
+backend blog_backends
+  mode http
+  option forwardfor
+  balance source
+  #appsession JSESSIONID len 52 timeout 3h
+  cookie SRV insert indirect nocache
+  server ghost-books ghost-books.admin:2368 #check
+  option httpchk GET /
+  http-check expect status 200
+
+backend git_backends
+  #mode http
+  option forwardfor
+  # http-request set-header X-Forwarded-Port %[dst_port]
+  http-request add-header X-Forwarded-Proto https if { ssl_fc }
+  http-request add-header X-Forwarded-Ssl on if { ssl_fc }
+  balance source
+  #appsession JSESSIONID len 52 timeout 3h
+  cookie SRV insert indirect nocache
+  server git-server 10.1.6.103:80 check
+  #server git-server 10.1.6.103:443 ssl verify none 
+  option httpchk GET /users/sign_in
+  http-check expect status 200
+
+backend stats_backends
+  option forwardfor
+  http-request add-header X-Forwarded-Proto https if { ssl_fc }
+  http-request add-header X-Forwarded-Ssl on if { ssl_fc }
+  balance source
+  #appsession JSESSIONID len 52 timeout 3h
+  cookie SRV insert indirect nocache
+  server piwik-server piwik.admin:80 check
+  option httpchk GET /
+  http-check expect status 200
+  compression algo gzip
+  compression type text/html text/plain text/css
+
+
+backend techan_backends
+  mode http
+  redirect scheme https if !{ ssl_fc } 
+  option forwardfor
+  http-request add-header X-Forwarded-Proto https if { ssl_fc }
+  http-request add-header X-Forwarded-Ssl on if { ssl_fc }
+  balance source
+  #appsession JSESSIONID len 52 timeout 3h
+  cookie SRV insert indirect nocache
+  server techan-wordpress1-server techan-wordpress-01.admin:80 #check
+  server techan-wordpress2-server techan-wordpress-02.admin:80 #check
+  option httpchk GET /
+  http-check expect status 200
+  compression algo gzip
+  compression type text/html text/plain text/css
+
+
+backend admin_backends
+  mode http
+  option forwardfor
+  # http-request set-header X-Forwarded-Port %[dst_port]
+  #balance roundrobin
+  balance source
+  #appsession JSESSIONID len 52 timeout 3h
+  cookie SRV insert indirect nocache
+  server ldap-web openldap.admin:80 #check
+  #server wordpress-test wordpress-test.frontend:80 #check
+  #server webc webc:80 check
+  # option httpchk OPTIONS * HTTP/1.1\r\nHost:\ localhost
+  option httpchk GET /
+  http-check expect status 200
+
+backend shipyard_backends
+  mode http
+  option forwardfor
+  # http-request set-header X-Forwarded-Port %[dst_port]
+  #balance roundrobin
+  balance source
+  #appsession JSESSIONID len 52 timeout 3h
+  cookie SRV insert indirect nocache
+  server shipyard shipyard-controller.admin:8080 #check
+  #server webc webc:80 check
+  # option httpchk OPTIONS * HTTP/1.1\r\nHost:\ localhost
+  option httpchk GET /
+  http-check expect status 200
+
+
+#########################################################################
+#########################################################################
+####              OpenVPN
+#########################################################################
+#########################################################################
+
+backend ovpn_backend
+#  log global
+  mode tcp
+  option tcplog
+  #balance source
+  #timeout server 15m
+  #server openvpn-01 openvpn-01.vpn:443 send-proxy
+  server openvpn-01 openvpn-01.admin:1194
+  server openvpn-02 openvpn-02.admin:1194
+  #server openvpn-02 openvpn-02.vpn:443 send-proxy
+#  server openvpn-02 openvpn-02.vpn:1194
+
+#########################################################################
+#########################################################################
+####              SSH
+#########################################################################
+#########################################################################
+
+#backend backend_ssh
+#    mode tcp
+#    server ssh-shipyard 212.47.248.20:22
